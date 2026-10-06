@@ -1,0 +1,32 @@
+# Скопируйте в config.yaml и поправьте под себя.
+
+# Чаты, в которых двойник отвечает. Остальные он не трогает.
+#   chat: @username, номер телефона (+7...), числовой id или ссылка-приглашение
+#   mode: all — модель видит каждое сообщение и сама решает, отвечать ли (по умолчанию);
+#         mentions — только когда вас упомянули или ответили на ваше сообщение
+chats:
+  - chat: "@friend_username"
+  - chat: -1001234567890
+    mode: mentions
+
+# Тестовый режим: ответы пишутся в лог, но не отправляются. Начните с него.
+dry_run: true
+
+persona_file: persona.md
+examples_file: data/examples.md
+session_name: twin   # файл twin.session — это ключ к вашему аккаунту, никому не отдавайте
+
+behavior:
+  history_limit: 30             # сколько последних сообщений чата видит модель
+  debounce_seconds: 8           # ждать, пока собеседник допишет серию сообщений
+  min_delay_seconds: 4          # случайная пауза перед ответом
+  max_delay_seconds: 25
+  typing_chars_per_second: 7    # «печатает...» длится пропорционально длине ответа
+  max_replies_per_hour: 20      # на один чат
+  pause_after_manual_minutes: 30  # если вы ответили сами, бот молчит в этом чате
+  ignore_bots: true
+
+llm:
+  model: claude-opus-5-5
+  effort: low        # low | medium | high — выше точнее, но дольше и дороже
+  max_tokens: 16000

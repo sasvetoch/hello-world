@@ -1,0 +1,14 @@
+# Ключ к Telegram-аккаунту — ни в коем случае не публиковать
+*.session
+*.session-journal
+
+# Личные настройки и данные
+.env
+config.yaml
+persona.md
+data/
+
+__pycache__/
+*.pyc
+.venv/
+venv/
