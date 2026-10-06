@@ -8,20 +8,14 @@ import yaml
 
 
 @dataclass
-class ChatRule:
-    chat: str | int          # @username, числовой id или ссылка
-    mode: str = "all"        # all — модель сама решает, отвечать ли; mentions — только на упоминания и ответы вам
-
-
-@dataclass
 class Behavior:
-    history_limit: int = 30            # сколько последних сообщений чата отдавать модели
-    debounce_seconds: float = 8.0      # ждать, пока собеседник допишет серию сообщений
-    min_delay_seconds: float = 4.0     # пауза «прочитал и задумался»
-    max_delay_seconds: float = 25.0
-    typing_chars_per_second: float = 7.0
-    max_replies_per_hour: int = 20     # на один чат
-    pause_after_manual_minutes: int = 30  # если вы написали в чат сами, бот молчит
+    history_limit: int = 40            # сколько последних сообщений чата отдавать модели
+    debounce_seconds: float = 6.0      # ждать, пока собеседник допишет серию сообщений
+    min_delay_seconds: float = 2.0     # пауза «прочитал и задумался»
+    max_delay_seconds: float = 10.0
+    typing_chars_per_second: float = 12.0
+    max_replies_per_hour: int = 30     # на один чат
+    owner_active_minutes: int = 10     # если вы сами пишете в группе, двойник не вмешивается
     ignore_bots: bool = True
 
 
@@ -34,16 +28,20 @@ class LLM:
 
 @dataclass
 class Config:
-    api_id: int
-    api_hash: str
+    bot_token: str
+    owner_id: int
+    owner_name: str
     anthropic_api_key: str | None
-    session_name: str = "twin"
     persona_file: Path = Path("persona.md")
     examples_file: Path = Path("data/examples.md")
-    chats: list[ChatRule] = field(default_factory=list)
+    knowledge_dir: Path = Path("knowledge")
+    db_file: Path = Path("data/twin.db")
+    # Что двойник отвечает незнакомцу, написавшему в личку, пока вы не разрешили диалог.
+    stranger_reply: str = ""
+    # Присылать вам копии диалогов двойника в личных чатах, чтобы их можно было поправить.
+    report_private: bool = True
     behavior: Behavior = field(default_factory=Behavior)
     llm: LLM = field(default_factory=LLM)
-    dry_run: bool = False
 
 
 def _load_dotenv(path: Path) -> None:
@@ -61,32 +59,28 @@ def load_config(path: str | Path = "config.yaml") -> Config:
     _load_dotenv(Path(".env"))
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
 
-    api_id = os.environ.get("TG_API_ID")
-    api_hash = os.environ.get("TG_API_HASH")
-    if not api_id or not api_hash:
-        raise SystemExit("Задайте TG_API_ID и TG_API_HASH в .env (берутся на my.telegram.org)")
+    token = os.environ.get("TG_BOT_TOKEN")
+    if not token:
+        raise SystemExit("Задайте TG_BOT_TOKEN в .env (выдаёт @BotFather)")
+    owner_id = os.environ.get("TG_OWNER_ID")
+    if not owner_id or not owner_id.lstrip("-").isdigit():
+        raise SystemExit("Задайте TG_OWNER_ID в .env — ваш числовой id в Telegram (подскажет @userinfobot)")
 
-    chats = []
-    for item in raw.get("chats", []):
-        if isinstance(item, (str, int)):
-            chats.append(ChatRule(chat=item))
-        else:
-            chats.append(ChatRule(chat=item["chat"], mode=item.get("mode", "all")))
-    if not chats:
-        raise SystemExit("В config.yaml не указан ни один чат в разделе chats")
-    for rule in chats:
-        if rule.mode not in ("all", "mentions"):
-            raise SystemExit(f"Неизвестный mode «{rule.mode}» для чата {rule.chat}")
+    owner_name = raw.get("owner_name")
+    if not owner_name:
+        raise SystemExit("Укажите owner_name в config.yaml — как вас зовут в переписке")
 
     return Config(
-        api_id=int(api_id),
-        api_hash=api_hash,
+        bot_token=token,
+        owner_id=int(owner_id),
+        owner_name=owner_name,
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
-        session_name=raw.get("session_name", "twin"),
         persona_file=Path(raw.get("persona_file", "persona.md")),
         examples_file=Path(raw.get("examples_file", "data/examples.md")),
-        chats=chats,
+        knowledge_dir=Path(raw.get("knowledge_dir", "knowledge")),
+        db_file=Path(raw.get("db_file", "data/twin.db")),
+        stranger_reply=raw.get("stranger_reply", ""),
+        report_private=bool(raw.get("report_private", True)),
         behavior=Behavior(**raw.get("behavior", {})),
         llm=LLM(**raw.get("llm", {})),
-        dry_run=bool(raw.get("dry_run", False)),
     )
