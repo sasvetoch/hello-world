@@ -5,18 +5,21 @@
 
 import asyncio
 import html
+import json
 import logging
 import random
 import sys
 import time
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ChatAction, ChatType
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     ChatMemberUpdated,
     InlineKeyboardButton,
@@ -26,6 +29,7 @@ from aiogram.types import (
 )
 
 from .config import Config, load_config
+from .examples import extract_examples
 from .llm import ReplyGenerator
 from .storage import Storage
 
@@ -40,6 +44,14 @@ OWNER_HELP = """\
 /forget <i>номер</i> — забыть факт (12) или исправление (и12)
 /fix <i>текст</i> — ответом на моё сообщение: «надо было ответить так»
 /reload — перечитать persona.md, примеры и папку knowledge
+
+<b>Файлы</b> — просто пришлите их мне:
+• <code>persona.md</code> — заменить описание личности
+• <code>result.json</code> — экспорт Telegram, я выберу из него примеры вашего стиля
+• <code>examples.md</code> — заменить примеры стиля (например, после правки)
+• любой другой <code>.md</code> или <code>.txt</code> — добавить в базу знаний
+/files — что сейчас загружено, /get — прислать persona.md и examples.md
+/delete <i>имя</i> — удалить файл из базы знаний
 
 <b>Чаты</b>
 /chats — список чатов
@@ -118,6 +130,10 @@ class Twin:
         r.message.register(self.cmd_status, Command("status"), owner, private)
         r.message.register(self.cmd_fix, Command("fix"), owner)
         r.message.register(self.cmd_enable_here, Command("enable", "disable"), owner, group)
+        r.message.register(self.cmd_files, Command("files"), owner, private)
+        r.message.register(self.cmd_get, Command("get"), owner, private)
+        r.message.register(self.cmd_delete, Command("delete"), owner, private)
+        r.message.register(self.on_owner_document, F.document, owner, private)
         r.message.register(self.on_owner_private, owner, private)
         r.message.register(self.on_private, private)
         r.message.register(self.on_group, group)
@@ -166,6 +182,91 @@ class Twin:
             return
         ok = self.store.forget(command.args)
         await message.answer("Забыл" if ok else "Такой записи нет — номера можно посмотреть в /memory")
+
+    # ---------- файлы ----------
+
+    async def on_owner_document(self, message: Message) -> None:
+        doc = message.document
+        name = Path(doc.file_name or "file.txt").name
+        if doc.file_size and doc.file_size > 20 * 1024 * 1024:
+            await message.answer("Файл больше 20 МБ — Telegram не даёт ботам скачивать такие. "
+                                 "Для экспорта выберите меньше чатов или экспортируйте их по одному.")
+            return
+        if not name.lower().endswith((".md", ".txt", ".json")):
+            await message.answer("Я понимаю только .md, .txt и экспорт Telegram в .json")
+            return
+        buf = await self.bot.download(doc)
+        raw = buf.read() if buf else b""
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            await message.answer("Не могу прочитать файл: нужен текст в кодировке UTF-8")
+            return
+
+        lower = name.lower()
+        if lower == "persona.md":
+            self.cfg.persona_file.write_text(text, encoding="utf-8")
+            reply = "Обновил описание личности"
+        elif lower == "examples.md":
+            self._write(self.cfg.examples_file, text)
+            reply = "Обновил примеры стиля"
+        elif lower.endswith(".json"):
+            try:
+                examples, total = extract_examples(json.loads(text))
+            except (ValueError, KeyError, TypeError) as e:
+                await message.answer(f"Не получилось разобрать экспорт: {e}")
+                return
+            self._write(self.cfg.examples_file, examples)
+            await message.answer_document(
+                BufferedInputFile(examples.encode("utf-8"), "examples.md"),
+                caption=(f"Нашёл {total} ваших ответов, взял {min(total, 60)} в примеры. "
+                         "Просмотрите файл: если там есть лишнее (адреса, телефоны, личное), "
+                         "удалите это и пришлите файл обратно с тем же именем."),
+            )
+            reply = ""
+        else:
+            self._write(self.cfg.knowledge_dir / name, text)
+            reply = f"Добавил «{name}» в базу знаний"
+        try:
+            self.generator.reload()
+        except SystemExit as e:
+            await message.answer(str(e))
+            return
+        if reply:
+            await message.answer(reply)
+
+    @staticmethod
+    def _write(path: Path, text: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    async def cmd_files(self, message: Message) -> None:
+        def size(path: Path) -> str:
+            return f"{path.stat().st_size // 1024 + 1} КБ" if path.exists() else "нет"
+        lines = [
+            f"Описание (persona.md): {size(self.cfg.persona_file)}",
+            f"Примеры стиля (examples.md): {size(self.cfg.examples_file)}",
+            "\n<b>База знаний</b>",
+        ]
+        kd = self.cfg.knowledge_dir
+        files = sorted(p for p in kd.rglob("*") if p.is_file()) if kd.is_dir() else []
+        lines += [f"• {html.escape(str(p.relative_to(kd)))} — {size(p)}" for p in files] or ["пусто"]
+        await message.answer("\n".join(lines), parse_mode="HTML")
+
+    async def cmd_get(self, message: Message) -> None:
+        for path in (self.cfg.persona_file, self.cfg.examples_file):
+            if path.exists():
+                await message.answer_document(BufferedInputFile(path.read_bytes(), path.name))
+
+    async def cmd_delete(self, message: Message, command: CommandObject) -> None:
+        name = Path((command.args or "").strip()).name
+        path = self.cfg.knowledge_dir / name
+        if not name or not path.is_file():
+            await message.answer("Такого файла нет — список в /files")
+            return
+        path.unlink()
+        self.generator.reload()
+        await message.answer(f"Удалил «{name}» из базы знаний")
 
     async def cmd_reload(self, message: Message) -> None:
         try:
@@ -546,6 +647,11 @@ class Twin:
         self.me_id, self.me_username = me.id, me.username or ""
         log.info("Бот @%s запущен. Владелец: %s", self.me_username, self.cfg.owner_id)
         await self.notify_owner("Я запущен. /help — список команд")
+        if "Скопируйте в persona.md" in self.cfg.persona_file.read_text(encoding="utf-8"):
+            await self.notify_owner(
+                "Описание личности ещё не заполнено. Скачайте шаблон командой /get, "
+                "заполните его и пришлите мне файл <code>persona.md</code>."
+            )
         await self.dp.start_polling(self.bot, allowed_updates=["message", "callback_query", "my_chat_member"])
 
 
